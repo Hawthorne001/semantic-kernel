@@ -80,8 +80,8 @@ public sealed class GoogleConnector : IWebSearchEngineConnector, IDisposable
 
         var results = await search.ExecuteAsync(cancellationToken).ConfigureAwait(false);
 
-        List<T>? returnValues = new();
-        if (results.Items != null)
+        List<T>? returnValues = null;
+        if (results.Items is not null)
         {
             if (typeof(T) == typeof(string))
             {
@@ -89,7 +89,7 @@ public sealed class GoogleConnector : IWebSearchEngineConnector, IDisposable
             }
             else if (typeof(T) == typeof(WebPage))
             {
-                List<WebPage> webPages = new();
+                List<WebPage> webPages = [];
                 foreach (var item in results.Items)
                 {
                     WebPage webPage = new()
@@ -107,7 +107,11 @@ public sealed class GoogleConnector : IWebSearchEngineConnector, IDisposable
                 throw new NotSupportedException($"Type {typeof(T)} is not supported.");
             }
         }
-        return returnValues != null && returnValues.Count == 0 ? returnValues : returnValues.Take(count);
+
+        return
+            returnValues is null ? [] :
+            returnValues.Count <= count ? returnValues :
+            returnValues.Take(count);
     }
 
     /// <summary>

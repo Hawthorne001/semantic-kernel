@@ -1,6 +1,5 @@
 # Copyright (c) Microsoft. All rights reserved.
 
-import pytest
 
 import semantic_kernel.connectors.ai.open_ai as sk_oai
 from semantic_kernel.kernel import Kernel
@@ -10,23 +9,17 @@ from tests.integration.fakes.summarize_plugin_fake import SummarizePluginFake
 from tests.integration.fakes.writer_plugin_fake import WriterPluginFake
 
 
-@pytest.mark.asyncio
-async def test_can_call_to_plan_from_xml(get_aoai_config):
-    deployment_name, api_key, endpoint = get_aoai_config
-
+async def test_can_call_to_plan_from_xml():
     kernel = Kernel()
     # Configure LLM service
     kernel.add_service(
         sk_oai.AzureChatCompletion(
             service_id="text_completion",
-            deployment_name=deployment_name,
-            endpoint=endpoint,
-            api_key=api_key,
         ),
     )
-    kernel.import_plugin_from_object(EmailPluginFake(), "email")
-    kernel.import_plugin_from_object(SummarizePluginFake(), "SummarizePlugin")
-    kernel.import_plugin_from_object(WriterPluginFake(), "WriterPlugin")
+    kernel.add_plugin(EmailPluginFake(), "email")
+    kernel.add_plugin(SummarizePluginFake(), "SummarizePlugin")
+    kernel.add_plugin(WriterPluginFake(), "WriterPlugin")
 
     plan_string = """
 <plan>
