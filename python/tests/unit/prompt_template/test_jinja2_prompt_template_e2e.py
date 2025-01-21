@@ -1,8 +1,5 @@
 # Copyright (c) Microsoft. All rights reserved.
 
-from typing import Optional
-
-from pytest import mark
 
 from semantic_kernel.contents.chat_history import ChatHistory
 from semantic_kernel.functions import kernel_function
@@ -16,7 +13,8 @@ def create_jinja2_prompt_template(template: str) -> Jinja2PromptTemplate:
     return Jinja2PromptTemplate(
         prompt_template_config=PromptTemplateConfig(
             name="test", description="test", template=template, template_format="jinja2"
-        )
+        ),
+        allow_dangerously_set_content=True,
     )
 
 
@@ -27,11 +25,10 @@ class MyPlugin:
         return "123 ok" if input == "123" else f"{input} != 123"
 
     @kernel_function()
-    def asis(self, input: Optional[str] = None) -> str:
+    def asis(self, input: str | None = None) -> str:
         return input or ""
 
 
-@mark.asyncio
 async def test_it_supports_variables(kernel: Kernel):
     # Arrange
     input = "template tests"
@@ -46,59 +43,54 @@ async def test_it_supports_variables(kernel: Kernel):
     assert expected == result
 
 
-@mark.asyncio
 async def test_it_allows_to_pass_variables_to_functions(kernel: Kernel):
     # Arrange
     template = "== {{ my_check123() }} =="
-    kernel.import_plugin_from_object(MyPlugin(), "my")
+    kernel.add_plugin(MyPlugin(), "my")
 
     arguments = KernelArguments(input="123")
     # Act
     result = await create_jinja2_prompt_template(template).render(kernel, arguments)
 
     # Assert
-    assert "== 123 ok ==" == result
+    assert result == "== 123 ok =="
 
 
-@mark.asyncio
 async def test_it_allows_to_pass_values_to_functions(kernel: Kernel):
     # Arrange
     template = "== {{ my_check123(input=234) }} =="
-    kernel.import_plugin_from_object(MyPlugin(), "my")
+    kernel.add_plugin(MyPlugin(), "my")
 
     # Act
     result = await create_jinja2_prompt_template(template).render(kernel, None)
 
     # Assert
-    assert "== 234 != 123 ==" == result
+    assert result == "== 234 != 123 =="
 
 
-@mark.asyncio
 async def test_it_allows_to_pass_escaped_values1_to_functions(kernel: Kernel):
     # Arrange
     template = """== {{ my_check123(input="a'b") }} =="""
-    kernel.import_plugin_from_object(MyPlugin(), "my")
+    kernel.add_plugin(MyPlugin(), "my")
     # Act
     result = await create_jinja2_prompt_template(template).render(kernel, None)
 
     # Assert
-    assert "== a'b != 123 ==" == result
+    assert result == "== a'b != 123 =="
 
 
-@mark.asyncio
 async def test_it_allows_to_pass_escaped_values2_to_functions(kernel: Kernel):
     # Arrange
     template = '== {{my_check123(input="a\\"b")}} =='
-    kernel.import_plugin_from_object(MyPlugin(), "my")
+    kernel.add_plugin(MyPlugin(), "my")
 
     # Act
     result = await create_jinja2_prompt_template(template).render(kernel, None)
 
     # Assert
-    assert '== a"b != 123 ==' == result
+    assert result == '== a"b != 123 =='
 
 
-@mark.asyncio
 async def test_chat_history_round_trip(kernel: Kernel):
     template = """{% for item in chat_history %}{{ message(item) }}{% endfor %}"""
     target = create_jinja2_prompt_template(template)

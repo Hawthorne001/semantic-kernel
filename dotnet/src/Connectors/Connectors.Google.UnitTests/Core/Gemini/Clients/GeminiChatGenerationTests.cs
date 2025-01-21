@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
+using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.SemanticKernel.ChatCompletion;
@@ -31,6 +32,24 @@ public sealed class GeminiChatGenerationTests : IDisposable
             File.ReadAllText(ChatTestDataFilePath));
 
         this._httpClient = new HttpClient(this._messageHandlerStub, false);
+    }
+
+    [Fact]
+    public async Task ShouldReturnEmptyMessageContentAndNullMetadataIfEmptyJsonInResponseAsync()
+    {
+        // Arrange
+        this._messageHandlerStub.ResponseToReturn.Content = new StringContent("{}");
+        var client = this.CreateChatCompletionClient();
+        var chatHistory = CreateSampleChatHistory();
+
+        // Act
+        var messages = await client.GenerateChatMessageAsync(chatHistory);
+
+        // Assert
+        Assert.Single(messages, item =>
+            item.Role == AuthorRole.Assistant &&
+            string.IsNullOrEmpty(item.Content) &&
+            item.Metadata == null);
     }
 
     [Fact]
@@ -218,7 +237,9 @@ public sealed class GeminiChatGenerationTests : IDisposable
         {
             MaxTokens = 102,
             Temperature = 0.45,
-            TopP = 0.6
+            TopP = 0.6,
+            AudioTimestamp = true,
+            ResponseMimeType = "application/json"
         };
 
         // Act
@@ -229,6 +250,8 @@ public sealed class GeminiChatGenerationTests : IDisposable
         Assert.NotNull(geminiRequest);
         Assert.Equal(executionSettings.MaxTokens, geminiRequest.Configuration!.MaxOutputTokens);
         Assert.Equal(executionSettings.Temperature, geminiRequest.Configuration!.Temperature);
+        Assert.Equal(executionSettings.AudioTimestamp, geminiRequest.Configuration!.AudioTimestamp);
+        Assert.Equal(executionSettings.ResponseMimeType, geminiRequest.Configuration!.ResponseMimeType);
         Assert.Equal(executionSettings.TopP, geminiRequest.Configuration!.TopP);
     }
 
@@ -259,21 +282,7 @@ public sealed class GeminiChatGenerationTests : IDisposable
     }
 
     [Fact]
-    public async Task ShouldThrowInvalidOperationExceptionIfChatHistoryContainsMoreThanOneSystemMessageAsync()
-    {
-        var client = this.CreateChatCompletionClient();
-        var chatHistory = new ChatHistory("System message");
-        chatHistory.AddSystemMessage("System message 2");
-        chatHistory.AddSystemMessage("System message 3");
-        chatHistory.AddUserMessage("hello");
-
-        // Act & Assert
-        await Assert.ThrowsAsync<InvalidOperationException>(
-            () => client.GenerateChatMessageAsync(chatHistory));
-    }
-
-    [Fact]
-    public async Task ShouldPassConvertedSystemMessageToUserMessageToRequestAsync()
+    public async Task ShouldPassSystemMessageToRequestAsync()
     {
         // Arrange
         var client = this.CreateChatCompletionClient();
@@ -287,40 +296,35 @@ public sealed class GeminiChatGenerationTests : IDisposable
         // Assert
         GeminiRequest? request = JsonSerializer.Deserialize<GeminiRequest>(this._messageHandlerStub.RequestContent);
         Assert.NotNull(request);
-        var systemMessage = request.Contents[0].Parts![0].Text;
-        var messageRole = request.Contents[0].Role;
-        Assert.Equal(AuthorRole.User, messageRole);
+        Assert.NotNull(request.SystemInstruction);
+        var systemMessage = request.SystemInstruction.Parts![0].Text;
+        Assert.Null(request.SystemInstruction.Role);
         Assert.Equal(message, systemMessage);
     }
 
     [Fact]
-    public async Task ShouldThrowNotSupportedIfChatHistoryHaveIncorrectOrderAsync()
+    public async Task ShouldPassMultipleSystemMessagesToRequestAsync()
     {
         // Arrange
+        string[] messages = ["System message 1", "System message 2", "System message 3"];
         var client = this.CreateChatCompletionClient();
-        var chatHistory = new ChatHistory();
+        var chatHistory = new ChatHistory(messages[0]);
+        chatHistory.AddSystemMessage(messages[1]);
+        chatHistory.AddSystemMessage(messages[2]);
         chatHistory.AddUserMessage("Hello");
-        chatHistory.AddAssistantMessage("Hi");
-        chatHistory.AddAssistantMessage("Hi me again");
-        chatHistory.AddUserMessage("How are you?");
 
-        // Act & Assert
-        await Assert.ThrowsAsync<NotSupportedException>(
-            () => client.GenerateChatMessageAsync(chatHistory));
-    }
+        // Act
+        await client.GenerateChatMessageAsync(chatHistory);
 
-    [Fact]
-    public async Task ShouldThrowNotSupportedIfChatHistoryNotEndWithUserMessageAsync()
-    {
-        // Arrange
-        var client = this.CreateChatCompletionClient();
-        var chatHistory = new ChatHistory();
-        chatHistory.AddUserMessage("Hello");
-        chatHistory.AddAssistantMessage("Hi");
-
-        // Act & Assert
-        await Assert.ThrowsAsync<NotSupportedException>(
-            () => client.GenerateChatMessageAsync(chatHistory));
+        // Assert
+        GeminiRequest? request = JsonSerializer.Deserialize<GeminiRequest>(this._messageHandlerStub.RequestContent);
+        Assert.NotNull(request);
+        Assert.NotNull(request.SystemInstruction);
+        Assert.Null(request.SystemInstruction.Role);
+        Assert.Collection(request.SystemInstruction.Parts!,
+            item => Assert.Equal(messages[0], item.Text),
+            item => Assert.Equal(messages[1], item.Text),
+            item => Assert.Equal(messages[2], item.Text));
     }
 
     [Fact]
@@ -416,6 +420,78 @@ public sealed class GeminiChatGenerationTests : IDisposable
         Assert.Equal(expectedVersion, header);
     }
 
+    [Fact]
+    public async Task ItCreatesPostRequestWithResponseSchemaPropertyAsync()
+    {
+        // Arrange
+        var client = this.CreateChatCompletionClient();
+        var chatHistory = CreateSampleChatHistory();
+        var settings = new GeminiPromptExecutionSettings { ResponseMimeType = "application/json", ResponseSchema = typeof(List<int>) };
+
+        // Act
+        await client.GenerateChatMessageAsync(chatHistory, settings);
+
+        // Assert
+        Assert.NotNull(this._messageHandlerStub.RequestHeaders);
+
+        var responseBody = Encoding.UTF8.GetString(this._messageHandlerStub.RequestContent!);
+
+        Assert.Contains("responseSchema", responseBody, StringComparison.Ordinal);
+        Assert.Contains("\"responseSchema\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"}}", responseBody, StringComparison.Ordinal);
+        Assert.Contains("\"responseMimeType\":\"application/json\"", responseBody, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ItCanUseValueTasksSequentiallyForBearerTokenAsync()
+    {
+        // Arrange
+        var bearerTokenGenerator = new BearerTokenGenerator()
+        {
+            BearerKeys = ["key1", "key2", "key3"]
+        };
+
+        var responseContent = File.ReadAllText(ChatTestDataFilePath);
+        using var content1 = new HttpResponseMessage { Content = new StringContent(responseContent) };
+        using var content2 = new HttpResponseMessage { Content = new StringContent(responseContent) };
+
+        using MultipleHttpMessageHandlerStub multipleMessageHandlerStub = new()
+        {
+            ResponsesToReturn = [content1, content2]
+        };
+        using var httpClient = new HttpClient(multipleMessageHandlerStub, false);
+
+        var client = new GeminiChatCompletionClient(
+            httpClient: httpClient,
+            modelId: "fake-model",
+            apiVersion: VertexAIVersion.V1,
+            bearerTokenProvider: bearerTokenGenerator.GetBearerToken,
+            location: "fake-location",
+            projectId: "fake-project-id");
+
+        var chatHistory = CreateSampleChatHistory();
+
+        // Act
+        await client.GenerateChatMessageAsync(chatHistory);
+        await client.GenerateChatMessageAsync(chatHistory);
+        var firstRequestHeader = multipleMessageHandlerStub.RequestHeaders[0]?.GetValues("Authorization").SingleOrDefault();
+        var secondRequestHeader = multipleMessageHandlerStub.RequestHeaders[1]?.GetValues("Authorization").SingleOrDefault();
+
+        // Assert
+        Assert.NotNull(firstRequestHeader);
+        Assert.NotNull(secondRequestHeader);
+        Assert.NotEqual(firstRequestHeader, secondRequestHeader);
+        Assert.Equal("Bearer key1", firstRequestHeader);
+        Assert.Equal("Bearer key2", secondRequestHeader);
+    }
+
+    private sealed class BearerTokenGenerator()
+    {
+        private int _index = 0;
+        public required List<string> BearerKeys { get; init; }
+
+        public ValueTask<string> GetBearerToken() => ValueTask.FromResult(this.BearerKeys[this._index++]);
+    }
+
     private static ChatHistory CreateSampleChatHistory()
     {
         var chatHistory = new ChatHistory();
@@ -435,7 +511,8 @@ public sealed class GeminiChatGenerationTests : IDisposable
             return new GeminiChatCompletionClient(
                 httpClient: httpClient ?? this._httpClient,
                 modelId: modelId,
-                bearerTokenProvider: () => Task.FromResult(bearerKey),
+                apiVersion: VertexAIVersion.V1,
+                bearerTokenProvider: () => new ValueTask<string>(bearerKey),
                 location: "fake-location",
                 projectId: "fake-project-id");
         }
@@ -443,6 +520,7 @@ public sealed class GeminiChatGenerationTests : IDisposable
         return new GeminiChatCompletionClient(
             httpClient: httpClient ?? this._httpClient,
             modelId: modelId,
+            apiVersion: GoogleAIVersion.V1,
             apiKey: "fake-key");
     }
 

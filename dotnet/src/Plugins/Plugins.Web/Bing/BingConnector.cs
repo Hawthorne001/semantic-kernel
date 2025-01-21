@@ -70,15 +70,15 @@ public sealed class BingConnector : IWebSearchEngineConnector
 
         this._logger.LogDebug("Response received: {StatusCode}", response.StatusCode);
 
-        string json = await response.Content.ReadAsStringWithExceptionMappingAsync().ConfigureAwait(false);
+        string json = await response.Content.ReadAsStringWithExceptionMappingAsync(cancellationToken).ConfigureAwait(false);
 
         // Sensitive data, logging as trace, disabled by default
         this._logger.LogTrace("Response content received: {Data}", json);
 
         WebSearchResponse? data = JsonSerializer.Deserialize<WebSearchResponse>(json);
 
-        List<T>? returnValues = new();
-        if (data?.WebPages?.Value != null)
+        List<T>? returnValues = null;
+        if (data?.WebPages?.Value is not null)
         {
             if (typeof(T) == typeof(string))
             {
@@ -87,13 +87,7 @@ public sealed class BingConnector : IWebSearchEngineConnector
             }
             else if (typeof(T) == typeof(WebPage))
             {
-                List<WebPage>? webPages = new();
-
-                foreach (var webPage in data.WebPages.Value)
-
-                {
-                    webPages.Add(webPage);
-                }
+                List<WebPage>? webPages = [.. data.WebPages.Value];
                 returnValues = webPages.Take(count).ToList() as List<T>;
             }
             else
@@ -101,7 +95,11 @@ public sealed class BingConnector : IWebSearchEngineConnector
                 throw new NotSupportedException($"Type {typeof(T)} is not supported.");
             }
         }
-        return returnValues != null && returnValues.Count == 0 ? returnValues : returnValues.Take(count);
+
+        return
+            returnValues is null ? [] :
+            returnValues.Count <= count ? returnValues :
+            returnValues.Take(count);
     }
 
     /// <summary>

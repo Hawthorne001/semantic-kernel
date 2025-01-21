@@ -15,8 +15,10 @@ using Microsoft.OpenApi.ApiManifest;
 using Microsoft.OpenApi.Readers;
 using Microsoft.OpenApi.Services;
 using Microsoft.SemanticKernel.Http;
+using Microsoft.SemanticKernel.Plugins.OpenApi;
+using Microsoft.SemanticKernel.Plugins.OpenApi.Extensions;
 
-namespace Microsoft.SemanticKernel.Plugins.OpenApi.Extensions;
+namespace Microsoft.SemanticKernel;
 /// <summary>
 /// Provides extension methods for the <see cref="Kernel"/> class related to OpenAPI functionality.
 /// </summary>
@@ -73,34 +75,49 @@ public static class ApiManifestKernelExtensions
 
         var loggerFactory = kernel.LoggerFactory;
         var logger = loggerFactory.CreateLogger(typeof(ApiManifestKernelExtensions)) ?? NullLogger.Instance;
-        string apiManifestFileJsonContents = await DocumentLoader.LoadDocumentFromFilePathAsync(filePath,
-            logger,
-            cancellationToken).ConfigureAwait(false);
-        JsonDocument jsonDocument = JsonDocument.Parse(apiManifestFileJsonContents);
+        using var apiManifestFileJsonContents = DocumentLoader.LoadDocumentFromFilePathAsStream(filePath,
+            logger);
+        JsonDocument jsonDocument = await JsonDocument.ParseAsync(apiManifestFileJsonContents, cancellationToken: cancellationToken).ConfigureAwait(false);
 
         ApiManifestDocument document = ApiManifestDocument.Load(jsonDocument.RootElement);
 
         var functions = new List<KernelFunction>();
+        var documentWalker = new OpenApiWalker(new OperationIdNormalizationOpenApiVisitor());
         foreach (var apiDependency in document.ApiDependencies)
         {
             var apiName = apiDependency.Key;
             var apiDependencyDetails = apiDependency.Value;
 
             var apiDescriptionUrl = apiDependencyDetails.ApiDescriptionUrl;
+            if (apiDescriptionUrl is null)
+            {
+                logger.LogWarning("ApiDescriptionUrl is missing for API dependency: {ApiName}", apiName);
+                continue;
+            }
 
-            var openApiDocumentString = await DocumentLoader.LoadDocumentFromUriAsync(new Uri(apiDescriptionUrl),
-                logger,
-                httpClient,
-                authCallback: null,
-                pluginParameters?.UserAgent,
-                cancellationToken).ConfigureAwait(false);
+            var (parsedDescriptionUrl, isOnlineDescription) = Uri.TryCreate(apiDescriptionUrl, UriKind.Absolute, out var result) ?
+                (result, true) :
+                (new Uri(Path.Combine(Path.GetDirectoryName(filePath) ?? string.Empty, apiDescriptionUrl)), false);
 
-            OpenApiDiagnostic diagnostic = new();
-            var openApiDocument = new OpenApiStringReader(new()
+            using var openApiDocumentStream = isOnlineDescription ?
+                await DocumentLoader.LoadDocumentFromUriAsStreamAsync(new Uri(apiDescriptionUrl),
+                    logger,
+                    httpClient,
+                    authCallback: null,
+                    pluginParameters?.UserAgent,
+                    cancellationToken).ConfigureAwait(false) :
+                DocumentLoader.LoadDocumentFromFilePathAsStream(parsedDescriptionUrl.LocalPath,
+                    logger);
+
+            var documentReadResult = await new OpenApiStreamReader(new()
             {
                 BaseUrl = new(apiDescriptionUrl)
             }
-            ).Read(openApiDocumentString, out diagnostic);
+            ).ReadAsync(openApiDocumentStream, cancellationToken).ConfigureAwait(false);
+            var openApiDocument = documentReadResult.OpenApiDocument;
+            var openApiDiagnostic = documentReadResult.OpenApiDiagnostic;
+
+            documentWalker.Walk(openApiDocument);
 
             var requestUrls = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
             var pathMethodPairs = apiDependencyDetails.Requests.Select(request => (request.UriTemplate, request.Method?.ToUpperInvariant()));
@@ -117,17 +134,19 @@ public static class ApiManifestKernelExtensions
                     continue;
                 }
 
-                requestUrls.Add(UriTemplate, new List<string>() { Method });
+                requestUrls.Add(UriTemplate, [Method]);
             }
 
             var predicate = OpenApiFilterService.CreatePredicate(null, null, requestUrls, openApiDocument);
             var filteredOpenApiDocument = OpenApiFilterService.CreateFilteredDocument(openApiDocument, predicate);
 
-            var serverUrl = filteredOpenApiDocument.Servers.FirstOrDefault()?.Url;
-
-            var openApiFunctionExecutionParameters = pluginParameters?.FunctionExecutionParameters?.ContainsKey(apiName) == true
-                ? pluginParameters.FunctionExecutionParameters[apiName]
-                : null;
+            var openApiFunctionExecutionParameters = pluginParameters?.FunctionExecutionParameters?.TryGetValue(apiName, out var parameters) == true
+                ? parameters
+                : new OpenApiFunctionExecutionParameters()
+                {
+                    EnableDynamicPayload = false,
+                    EnablePayloadNamespacing = true,
+                };
 
 #pragma warning disable CA2000 // Dispose objects before losing scope. No need to dispose the Http client here. It can either be an internal client using NonDisposableHttpClientHandler or an external client managed by the calling code, which should handle its disposal.
             var operationRunnerHttpClient = HttpClientProvider.GetHttpClient(openApiFunctionExecutionParameters?.HttpClient ?? kernel.Services.GetService<HttpClient>());
@@ -137,18 +156,26 @@ public static class ApiManifestKernelExtensions
                 operationRunnerHttpClient,
                 openApiFunctionExecutionParameters?.AuthCallback,
                 openApiFunctionExecutionParameters?.UserAgent,
-                openApiFunctionExecutionParameters?.EnableDynamicPayload ?? true,
+                openApiFunctionExecutionParameters?.EnableDynamicPayload ?? false,
                 openApiFunctionExecutionParameters?.EnablePayloadNamespacing ?? false);
 
+            var server = filteredOpenApiDocument.Servers.FirstOrDefault();
+            if (server?.Url is null)
+            {
+                logger.LogWarning("Server URI not found. Plugin: {0}", pluginName);
+                continue;
+            }
+            var info = OpenApiDocumentParser.ExtractRestApiInfo(filteredOpenApiDocument);
+            var security = OpenApiDocumentParser.CreateRestApiOperationSecurityRequirements(filteredOpenApiDocument.SecurityRequirements);
             foreach (var path in filteredOpenApiDocument.Paths)
             {
-                var operations = OpenApiDocumentParser.CreateRestApiOperations(serverUrl, path.Key, path.Value);
+                var operations = OpenApiDocumentParser.CreateRestApiOperations(filteredOpenApiDocument, path.Key, path.Value, null, logger);
                 foreach (RestApiOperation operation in operations)
                 {
                     try
                     {
                         logger.LogTrace("Registering Rest function {0}.{1}", pluginName, operation.Id);
-                        functions.Add(OpenApiKernelExtensions.CreateRestApiFunction(pluginName, runner, operation, openApiFunctionExecutionParameters, new Uri(serverUrl), loggerFactory));
+                        functions.Add(OpenApiKernelPluginFactory.CreateRestApiFunction(pluginName, runner, info, security, operation, openApiFunctionExecutionParameters, new Uri(server.Url), loggerFactory));
                     }
                     catch (Exception ex) when (!ex.IsCriticalException())
                     {

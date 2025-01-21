@@ -1,6 +1,7 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
 using System;
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Linq;
 using System.Net.Http;
@@ -8,6 +9,7 @@ using System.Net.Http;
 namespace Microsoft.SemanticKernel.Connectors.Weaviate;
 
 // ReSharper disable once ClassCannotBeInstantiated
+[Experimental("SKEXP0020")]
 internal sealed class CreateGraphRequest
 {
 #pragma warning disable CS8618
@@ -27,7 +29,7 @@ internal sealed class CreateGraphRequest
                          $"distance:{this.Distance}}} " +
                          $"limit:{this.Limit}){{{(this.WithVector ? "_additional{vector}" : string.Empty)} " +
                          "_additional{id distance} sk_timestamp sk_id sk_description sk_text sk_additional_metadata}}}";
-        string queryJson = $"{{\"query\":\"{payload}\"}}";
+        string queryJson = $$"""{"query":"{{payload}}"}""";
         return HttpRequest.CreatePostRequest(
             "graphql",
             queryJson);
